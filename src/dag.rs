@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "cargo-clippy", allow(clippy::needless_return))]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -29,20 +31,20 @@ trait Visitable<T> {
 /// dag node
 ///
 struct Node<T> where T: Hash + Eq {
-    value: T,
+    entry: T,
     outs: Vec<Link<T>>,
     ins: Vec<Link<T>>,
 }
 
 impl <T> PartialEq for Node<T> where T: Hash + Eq {
     fn eq(&self, other: &Self) -> bool {
-        return self.value.eq(&other.value);
+        return self.entry.eq(&other.entry);
     }
 }
 
 impl <T> Hash for Node<T> where T: Hash + Eq {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        return self.value.hash(state);
+        return self.entry.hash(state);
     }
 }
 
@@ -53,7 +55,7 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     ///
     fn new_link(value: T) -> Link<T> {
         return Rc::new(RefCell::new(Node {
-            value,
+            entry: value,
             outs: Vec::new(),
             ins: Vec::new()
         }));
@@ -77,14 +79,45 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     /// Add an out
     ///
     fn link_out(&mut self, node: Link<T>) {
-        self.outs.push(node);
+        if !self.outs.contains(&node) {
+            self.outs.push(node);
+        }
     }
 
     ///
     /// Add an in
     ///
     fn link_in(&mut self, node: Link<T>) {
-        self.ins.push(node);
+        if !self.ins.contains(&node) {
+            self.ins.push(node);
+        }
+    }
+
+    ///
+    /// Find all direct links that also have indirect links
+    /// and remove them.
+    ///
+    fn remove_direct_links(&mut self) -> usize {
+        let mut index: usize = 0;
+        let mut indexes: Vec<usize> = Vec::new();
+        for link in &self.outs {
+            for link2 in &self.outs {
+                if link != link2 &&
+                    link2.borrow().visit_mut(&mut |c, _, _| c == &link.borrow().entry) {
+                    indexes.push(index);
+                    break;
+                }
+            }
+            index += 1;
+        }
+
+        let mut offset = 0;
+        for x in &indexes {
+            self.outs.remove(x - offset);
+            offset += 1;
+        }
+
+        return indexes.len();
     }
 
     ///
@@ -92,14 +125,15 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     ///
     fn get_cycle_path(&self) -> Option<Vec<T>> {
         let mut path: Vec<T> = Vec::new();
-        if !self.visit_mut(&mut |c, _, _| {
+        let mut visitor = |c: &T, _, _| {
             if path.contains(c) {
                 path.push(c.clone());
                 return true;
             }
             path.push(c.clone());
             return false;
-        }) {
+        };
+        if !self.visit_mut(&mut visitor) {
             return None;
         }
         return Some(path);
@@ -109,8 +143,10 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     /// link 2 nodes.  The direction is from -> to
     ///
     fn link(node_from: Link<T>, node_to: Link<T>) {
-        node_from.borrow_mut().link_out(node_to.clone());
-        node_to.borrow_mut().link_in(node_from.clone());
+        if node_from != node_to {
+            node_from.borrow_mut().link_out(node_to.clone());
+            node_to.borrow_mut().link_in(node_from.clone());
+        }
     }
 }
 
@@ -121,7 +157,7 @@ impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
     fn visit_mut<V>(&self, visitor: &mut V) -> bool
         where V: FnMut(&T, bool, bool) -> bool {
 
-        if visitor(&self.value, self.is_head(), self.is_tail()) {
+        if visitor(&self.entry, self.is_head(), self.is_tail()) {
             return true;
         }
         for link in &self.outs {
@@ -133,7 +169,7 @@ impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
     }
 
     fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
-        if visitor(&self.value, self.is_head(), self.is_tail()) {
+        if visitor(&self.entry, self.is_head(), self.is_tail()) {
             return true;
         }
         for link in &self.outs {
@@ -172,6 +208,14 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
         return self;
     }
 
+    fn sort(&self) -> usize {
+        let mut remove_count = 0;
+        for link in self.map.values() {
+            remove_count += link.borrow_mut().remove_direct_links();
+        }
+        return remove_count;
+    }
+
     ///
     /// Get all the cycles in the graph
     ///
@@ -193,12 +237,10 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
 
         // if head count is 0 then the entire thing is a cycle
         if head_count == 0 {
-            for link in self.map.values() {
-                let node = link.borrow();
-                if let Some(cycle) = node.get_cycle_path() {
-                    paths.push(cycle);
-                }
-                break;
+            let link = self.map.values().find(|_| true).unwrap();
+            let node = link.borrow();
+            if let Some(cycle) = node.get_cycle_path() {
+                paths.push(cycle);
             }
         }
 
@@ -211,6 +253,28 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
     fn contains_cycle(&self) -> bool {
         return !(self.get_cycles(true).is_empty());
     }
+
+    fn is_singly_linked(&self) -> bool {
+        let mut head_count: usize = 0;
+        let mut tail_count: usize = 0;
+        for link in self.map.values() {
+            let node = link.borrow();
+            if node.is_head() {
+                head_count += 1;
+                if node.outs.len() != 1 {
+                    return false;
+                }
+            } else if node.is_tail() {
+                tail_count += 1;
+                if node.ins.len() != 1 {
+                    return false;
+                }
+            } else if node.ins.len() != 1 || node.outs.len() != 1 {
+                return false;
+            }
+        }
+        return head_count == 1 && tail_count == 1;
+    }
 }
 
 impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
@@ -218,10 +282,8 @@ impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
         where V: FnMut(&T, bool, bool) -> bool {
         for link in self.map.values() {
             let node = link.borrow();
-            if node.is_head() {
-                if node.visit_mut(visitor) {
-                    return true;
-                }
+            if node.is_head() && node.visit_mut(visitor) {
+                return true;
             }
         }
         return false;
@@ -230,10 +292,8 @@ impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
     fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
         for link in self.map.values() {
             let node = link.borrow();
-            if node.is_head() {
-                if node.visit(visitor) {
-                    return true;
-                }
+            if node.is_head() && node.visit(visitor) {
+                return true;
             }
         }
         return false;
@@ -250,13 +310,27 @@ mod tests {
     fn test_stuff() {
         let mut dag: HashDAG<char> = HashDAG::new();
         dag.link('c', 'd')
-            .link('a', 'b')
-            .link('y', 'z')
+            .link('a', 'd')
             .link('b', 'c')
+            .link('a', 'b')
+            .link('a', 'c')
+            .link('a', 'b')
+            .link('a', 'a')
+            .link('c', 'x')
             .link('x', 'y');
 
+        println!("{}", dag.is_singly_linked());
+
         dag.visit(|c: &char, head: bool, tail: bool| {
-            println!("{} {} {}", c, head, tail);
+            println!("1 {} {} {}", c, head, tail);
+            return false;
+        });
+
+        println!("{}", dag.sort());
+        println!("{}", dag.is_singly_linked());
+
+        dag.visit(|c: &char, head: bool, tail: bool| {
+            println!("2 {} {} {}", c, head, tail);
             return false;
         });
 
@@ -270,13 +344,5 @@ mod tests {
             println!("{} {} {}", c, head, tail);
             return false;
         });
-
-        dag.link('b', 'z');
-
-        let x: Vec<String> = dag.get_cycles(false).iter()
-            .map(|a| String::from_iter(a))
-            .collect();
-        println!("Contains cycle: {}", dag.contains_cycle());
-        println!("Cycles {}", x.join("\n"));
     }
 }
