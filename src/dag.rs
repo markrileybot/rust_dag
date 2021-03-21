@@ -90,17 +90,19 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     ///
     /// Detect and return the first cycle in this nodes out path
     ///
-    fn get_cycle_path(&self) -> Vec<T> {
+    fn get_cycle_path(&self) -> Option<Vec<T>> {
         let mut path: Vec<T> = Vec::new();
-        self.visit_mut(&mut |c, _, _| {
+        if !self.visit_mut(&mut |c, _, _| {
             if path.contains(c) {
                 path.push(c.clone());
                 return true;
             }
             path.push(c.clone());
             return false;
-        });
-        return path;
+        }) {
+            return None;
+        }
+        return Some(path);
     }
 
     ///
@@ -180,8 +182,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
-                let cycle = node.get_cycle_path();
-                if !cycle.is_empty() {
+                if let Some(cycle) = node.get_cycle_path() {
                     paths.push(cycle);
                     if first {
                         break;
@@ -194,8 +195,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
         if head_count == 0 {
             for link in self.map.values() {
                 let node = link.borrow();
-                let cycle = node.get_cycle_path();
-                if !cycle.is_empty() {
+                if let Some(cycle) = node.get_cycle_path() {
                     paths.push(cycle);
                 }
                 break;
@@ -209,7 +209,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
     /// Does the graph contain any cycles?
     ///
     fn contains_cycle(&self) -> bool {
-        return !self.get_cycles(true).is_empty()
+        return !(self.get_cycles(true).is_empty());
     }
 }
 
@@ -242,8 +242,9 @@ impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
 
 #[cfg(test)]
 mod tests {
-    use crate::dag::{HashDAG, Visitable};
     use std::iter::FromIterator;
+
+    use crate::dag::{HashDAG, Visitable};
 
     #[test]
     fn test_stuff() {
@@ -259,11 +260,11 @@ mod tests {
             return false;
         });
 
-        println!("{}", dag.contains_cycle());
+        println!("Contains cycle: {}", dag.contains_cycle());
 
         dag.link('z', 'a');
 
-        println!("{}", dag.contains_cycle());
+        println!("Contains cycle: {}", dag.contains_cycle());
 
         dag.visit(|c: &char, head: bool, tail: bool| {
             println!("{} {} {}", c, head, tail);
@@ -275,7 +276,7 @@ mod tests {
         let x: Vec<String> = dag.get_cycles(false).iter()
             .map(|a| String::from_iter(a))
             .collect();
-        println!("{}", dag.contains_cycle());
-        println!("{}", x.join("\n"));
+        println!("Contains cycle: {}", dag.contains_cycle());
+        println!("Cycles {}", x.join("\n"));
     }
 }
