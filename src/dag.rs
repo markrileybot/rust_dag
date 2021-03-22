@@ -24,6 +24,12 @@ trait Visitable<T> {
         where V: FnMut(&T, bool, bool) -> bool;
 
     ///
+    /// Visit borrowed
+    ///
+    fn visit_ref<V>(&self, visitor: &V) -> bool
+        where V: Fn(&T, bool, bool) -> bool;
+
+    ///
     /// Visit with a function pointer.  Simpler.
     ///
     fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool;
@@ -35,7 +41,7 @@ trait Visitable<T> {
 struct Node<T> {
     entry: T,
     outs: Vec<Link<T>>,
-    ins: Vec<Link<T>>,
+    ins: Vec<Link<T>>
 }
 
 impl <T> Display for Node<T> where T: Display {
@@ -84,6 +90,14 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     }
 
     ///
+    /// Is this singly linked? (single out and single in)
+    fn is_singly_linked(&self) -> bool {
+        return (self.is_head() && self.outs.len() == 1)
+            || (self.is_tail() && self.ins.len() == 1)
+            || (self.outs.len() == 1 && self.ins.len() == 1);
+    }
+
+    ///
     /// Add an out
     ///
     fn link_out(&mut self, node: Link<T>) {
@@ -102,15 +116,29 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     }
 
     ///
-    /// Find all direct links that also have indirect links
-    /// and remove them.
+    /// Remove an out
+    ///
+    fn unlink_out(&mut self, node: &Link<T>) {
+        self.outs.retain(|li| li != node);
+    }
+
+    ///
+    /// Remove an in
+    ///
+    fn unlink_in(&mut self, node: &Link<T>) {
+        self.ins.retain(|li| li != node);
+    }
+
+    ///
+    /// Find all direct links that also have indirect links and remove them.
     ///
     fn get_removable_direct_links(&self) -> Vec<Link<T>> {
         let mut removals: Vec<Link<T>> = Vec::new();
         for link in &self.outs {
+            let node = link.borrow();
             for link2 in &self.outs {
-                if link != link2 &&
-                    link2.borrow().visit_mut(&mut |c, _, _| c == &link.borrow().entry) {
+                let node2 = link2.borrow();
+                if link != link2 && node2.visit_ref(&|c, _, _| c == &node.entry) {
                     removals.push(link.clone());
                     break;
                 }
@@ -122,10 +150,7 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
 
     ///
     /// Detect and return the first cycle in this nodes out path
-    ///    b
-    /// a / \ d - e
-    ///   \ /
-    ///    c
+    ///
     fn get_cycle_path(&self) -> Option<Vec<T>> {
         let mut path: Vec<T> = Vec::new();
         self.get_cycle_path_internal(&mut path);
@@ -153,42 +178,53 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     ///
     /// link 2 nodes.  The direction is from -> to
     ///
-    fn link(node_from: Link<T>, node_to: Link<T>) {
+    fn link(node_from: &Link<T>, node_to: &Link<T>) {
         if node_from != node_to {
             node_from.borrow_mut().link_out(node_to.clone());
-            node_to.borrow_mut().link_in(node_from);
+            node_to.borrow_mut().link_in(node_from.clone());
         }
     }
+
+    ///
+    /// unlink 2 nodes.  The direction is from -> to
+    ///
+    fn unlink(node_from: &Link<T>, node_to: &Link<T>) {
+        node_from.borrow_mut().unlink_out(&node_to);
+        node_to.borrow_mut().unlink_in(&node_from);
+    }
+}
+
+macro_rules! node_visit_impl {
+    ($self:expr, $visitor:expr, $visit_call:ident) => {{
+        if $visitor(&$self.entry, $self.is_head(), $self.is_tail()) {
+            return true;
+        }
+        for link in &$self.outs {
+            if link.borrow().$visit_call($visitor) {
+                return true;
+            }
+        }
+        return false;
+    }}
 }
 
 ///
 /// Visitable impl
 ///
 impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
+
     fn visit_mut<V>(&self, visitor: &mut V) -> bool
         where V: FnMut(&T, bool, bool) -> bool {
+        node_visit_impl!(self, visitor, visit_mut);
+    }
 
-        if visitor(&self.entry, self.is_head(), self.is_tail()) {
-            return true;
-        }
-        for link in &self.outs {
-            if link.borrow().visit_mut(visitor) {
-                return true;
-            }
-        }
-        return false;
+    fn visit_ref<V>(&self, visitor: &V) -> bool
+        where V: Fn(&T, bool, bool) -> bool {
+        node_visit_impl!(self, visitor, visit_ref);
     }
 
     fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
-        if visitor(&self.entry, self.is_head(), self.is_tail()) {
-            return true;
-        }
-        for link in &self.outs {
-            if link.borrow().visit(visitor) {
-                return true;
-            }
-        }
-        return false;
+        node_visit_impl!(self, visitor, visit);
     }
 }
 
@@ -214,17 +250,16 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
         let link1 = self.map.entry(o1.clone())
             .or_insert_with(|| Node::new_link(o1)).clone();
         let link2 = self.map.entry(o2.clone())
-            .or_insert_with(|| Node::new_link(o2)).clone();
-        Node::link(link1, link2);
+            .or_insert_with(|| Node::new_link(o2));
+        Node::link(&link1, &link2);
         return self;
     }
 
     fn sort(&self) {
         for link in self.map.values() {
             let removables = link.borrow().get_removable_direct_links();
-            link.borrow_mut().outs.retain(|link| !removables.contains(link));
             for remove in removables {
-                remove.borrow_mut().ins.retain(|li| li != link);
+                Node::unlink(link, &remove);
             }
         }
     }
@@ -274,15 +309,10 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
-                if node.outs.len() != 1 {
-                    return false;
-                }
             } else if node.is_tail() {
                 tail_count += 1;
-                if node.ins.len() != 1 {
-                    return false;
-                }
-            } else if node.ins.len() != 1 || node.outs.len() != 1 {
+            }
+            if !node.is_singly_linked() {
                 return false;
             }
         }
@@ -290,35 +320,39 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     }
 }
 
+macro_rules! hashdag_visit_impl {
+    ($self:expr, $visitor:expr, $visit_call:ident) => {{
+        for link in $self.map.values() {
+            let node = link.borrow();
+            if node.is_head() && node.$visit_call($visitor) {
+                return true;
+            }
+        }
+        return false;
+    }}
+}
 impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
     fn visit_mut<V>(&self, visitor: &mut V) -> bool
         where V: FnMut(&T, bool, bool) -> bool {
-        for link in self.map.values() {
-            let node = link.borrow();
-            if node.is_head() && node.visit_mut(visitor) {
-                return true;
-            }
-        }
-        return false;
+        hashdag_visit_impl!(self, visitor, visit_mut);
+    }
+
+    fn visit_ref<V>(&self, visitor: &V) -> bool
+        where V: Fn(&T, bool, bool) -> bool {
+        hashdag_visit_impl!(self, visitor, visit_ref);
     }
 
     fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
-        for link in self.map.values() {
-            let node = link.borrow();
-            if node.is_head() && node.visit(visitor) {
-                return true;
-            }
-        }
-        return false;
+        hashdag_visit_impl!(self, visitor, visit);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::min;
     use std::iter::FromIterator;
 
     use crate::dag::{HashDAG, Visitable};
-    use std::cmp::min;
 
     fn dag_printer(c: &char, head: bool, tail: bool) -> bool {
         if tail {
