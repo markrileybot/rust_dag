@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
@@ -30,10 +32,16 @@ trait Visitable<T> {
 ///
 /// dag node
 ///
-struct Node<T> where T: Hash + Eq {
+struct Node<T> {
     entry: T,
     outs: Vec<Link<T>>,
     ins: Vec<Link<T>>,
+}
+
+impl <T> Display for Node<T> where T: Display {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.entry)
+    }
 }
 
 impl <T> PartialEq for Node<T> where T: Hash + Eq {
@@ -97,46 +105,49 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     /// Find all direct links that also have indirect links
     /// and remove them.
     ///
-    fn remove_direct_links(&mut self) -> usize {
-        let mut index: usize = 0;
-        let mut indexes: Vec<usize> = Vec::new();
+    fn get_removable_direct_links(&self) -> Vec<Link<T>> {
+        let mut removals: Vec<Link<T>> = Vec::new();
         for link in &self.outs {
             for link2 in &self.outs {
                 if link != link2 &&
                     link2.borrow().visit_mut(&mut |c, _, _| c == &link.borrow().entry) {
-                    indexes.push(index);
+                    removals.push(link.clone());
                     break;
                 }
             }
-            index += 1;
         }
 
-        let mut offset = 0;
-        for x in &indexes {
-            self.outs.remove(x - offset);
-            offset += 1;
-        }
-
-        return indexes.len();
+        return removals;
     }
 
     ///
     /// Detect and return the first cycle in this nodes out path
-    ///
+    ///    b
+    /// a / \ d - e
+    ///   \ /
+    ///    c
     fn get_cycle_path(&self) -> Option<Vec<T>> {
         let mut path: Vec<T> = Vec::new();
-        let mut visitor = |c: &T, _, _| {
-            if path.contains(c) {
-                path.push(c.clone());
-                return true;
-            }
-            path.push(c.clone());
-            return false;
-        };
-        if !self.visit_mut(&mut visitor) {
+        self.get_cycle_path_internal(&mut path);
+        if path.is_empty() {
             return None;
         }
         return Some(path);
+    }
+
+    fn get_cycle_path_internal(&self, path: &mut Vec<T>) -> bool {
+        if path.contains(&self.entry) {
+            path.push(self.entry.clone());
+            return true;
+        }
+        path.push(self.entry.clone());
+        for link in &self.outs {
+            if link.borrow().get_cycle_path_internal(path) {
+                return true;
+            }
+        }
+        path.pop();
+        return false;
     }
 
     ///
@@ -185,11 +196,11 @@ impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
 /// A thing that holds links in a hash map and a graph.
 /// The key to the map is T
 ///
-struct HashDAG<T> where T: Clone + Hash + Eq {
+struct HashDAG<T> {
     map: HashMap<T, Link<T>>
 }
 
-impl <T> HashDAG<T> where T: Clone + Hash + Eq {
+impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn new() -> Self {
         return Self {
             map: HashMap::new()
@@ -208,12 +219,14 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq {
         return self;
     }
 
-    fn sort(&self) -> usize {
-        let mut remove_count = 0;
+    fn sort(&self) {
         for link in self.map.values() {
-            remove_count += link.borrow_mut().remove_direct_links();
+            let removables = link.borrow().get_removable_direct_links();
+            link.borrow_mut().outs.retain(|link| !removables.contains(link));
+            for remove in removables {
+                remove.borrow_mut().ins.retain(|li| li != link);
+            }
         }
-        return remove_count;
     }
 
     ///
@@ -315,34 +328,56 @@ mod tests {
             .link('a', 'b')
             .link('a', 'c')
             .link('a', 'b')
-            .link('a', 'a')
-            .link('c', 'x')
-            .link('x', 'y');
+            .link('a', 'a');
 
-        println!("{}", dag.is_singly_linked());
-
-        dag.visit(|c: &char, head: bool, tail: bool| {
-            println!("1 {} {} {}", c, head, tail);
+        let printer = |c: &char, head: bool, tail: bool| {
+            if tail {
+                println!("{} >>", c);
+            } else if head {
+                print!("<< {}->", c);
+            } else {
+                print!("{}->", c);
+            }
             return false;
-        });
+        };
 
-        println!("{}", dag.sort());
-        println!("{}", dag.is_singly_linked());
+        assert_eq!(dag.is_singly_linked(), false);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
 
-        dag.visit(|c: &char, head: bool, tail: bool| {
-            println!("2 {} {} {}", c, head, tail);
-            return false;
-        });
+        dag.sort();
+        assert_eq!(dag.is_singly_linked(), true);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
 
-        println!("Contains cycle: {}", dag.contains_cycle());
+        dag.link('a', 'x');
+        dag.link('d', 'x');
+        assert_eq!(dag.is_singly_linked(), false);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
 
-        dag.link('z', 'a');
+        dag.sort();
+        assert_eq!(dag.is_singly_linked(), true);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
 
-        println!("Contains cycle: {}", dag.contains_cycle());
+        dag.link('c', 'f');
+        dag.link('f', 'd');
+        assert_eq!(dag.is_singly_linked(), false);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
 
-        dag.visit(|c: &char, head: bool, tail: bool| {
-            println!("{} {} {}", c, head, tail);
-            return false;
-        });
+        dag.sort();
+        assert_eq!(dag.is_singly_linked(), true);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(printer);
+
+        dag.link('x', 'd');
+        assert_eq!(dag.is_singly_linked(), false);
+        assert_eq!(dag.contains_cycle(), true);
+        let cycles: Vec<String> = dag.get_cycles(false).iter()
+            .map(String::from_iter)
+            .collect();
+        println!("{}", cycles.join("\n"));
     }
 }
