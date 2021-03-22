@@ -156,7 +156,7 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
     fn link(node_from: Link<T>, node_to: Link<T>) {
         if node_from != node_to {
             node_from.borrow_mut().link_out(node_to.clone());
-            node_to.borrow_mut().link_in(node_from.clone());
+            node_to.borrow_mut().link_in(node_from);
         }
     }
 }
@@ -318,6 +318,18 @@ mod tests {
     use std::iter::FromIterator;
 
     use crate::dag::{HashDAG, Visitable};
+    use std::cmp::min;
+
+    fn dag_printer(c: &char, head: bool, tail: bool) -> bool {
+        if tail {
+            println!("{} >>", c);
+        } else if head {
+            print!("<< {}->", c);
+        } else {
+            print!("{}->", c);
+        }
+        return false;
+    }
 
     #[test]
     fn test_stuff() {
@@ -330,47 +342,36 @@ mod tests {
             .link('a', 'b')
             .link('a', 'a');
 
-        let printer = |c: &char, head: bool, tail: bool| {
-            if tail {
-                println!("{} >>", c);
-            } else if head {
-                print!("<< {}->", c);
-            } else {
-                print!("{}->", c);
-            }
-            return false;
-        };
-
         assert_eq!(dag.is_singly_linked(), false);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.sort();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.link('a', 'x');
         dag.link('d', 'x');
         assert_eq!(dag.is_singly_linked(), false);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.sort();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.link('c', 'f');
         dag.link('f', 'd');
         assert_eq!(dag.is_singly_linked(), false);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.sort();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
-        dag.visit(printer);
+        dag.visit(dag_printer);
 
         dag.link('x', 'd');
         assert_eq!(dag.is_singly_linked(), false);
@@ -379,5 +380,38 @@ mod tests {
             .map(String::from_iter)
             .collect();
         println!("{}", cycles.join("\n"));
+    }
+
+    #[test]
+    fn test_alphabet_finder() {
+        let words = vec![
+            "baa".to_string(), "abcd".to_string(),
+            "abca".to_string(), "cab".to_string(),
+            "cad".to_string()
+        ];
+        let mut dag: HashDAG<char> = HashDAG::new();
+        for (index, word) in words.iter().enumerate() {
+            if index + 1 < words.len() {
+                let next_word = &words[index + 1];
+                let len = min(word.len(), next_word.len());
+                for i in 0..len {
+                    let word_c = word.chars().nth(i).unwrap();
+                    let next_word_c = next_word.chars().nth(i).unwrap();
+                    if word_c != next_word_c {
+                        dag.link(word_c, next_word_c);
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(dag.is_singly_linked(), false);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(dag_printer);
+
+        dag.sort();
+        assert_eq!(dag.is_singly_linked(), true);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(dag_printer);
     }
 }
