@@ -10,8 +10,6 @@ use std::rc::Rc;
 
 type Link<T> = Rc<RefCell<Node<T>>>;
 
-trait Owner {}
-
 struct VisitState<T> {
     entry: Option<T>,
     head: bool,
@@ -312,8 +310,6 @@ impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
         node_visit_impl!(self, state, visitor, _visit);
     }
 }
-
-impl <T> Owner for Node<T> {}
 
 ///
 /// A thing that holds links in a hash map and a graph.
