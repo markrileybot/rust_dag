@@ -1,10 +1,11 @@
 #![cfg_attr(feature = "cargo-clippy", allow(clippy::needless_return))]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::option::Option::Some;
 use std::rc::Rc;
 
 type Link<T> = Rc<RefCell<Node<T>>>;
@@ -95,6 +96,13 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
         return (self.is_head() && self.outs.len() == 1)
             || (self.is_tail() && self.ins.len() == 1)
             || (self.outs.len() == 1 && self.ins.len() == 1);
+    }
+
+    ///
+    /// Is this guy an island? (no links)
+    ///
+    fn is_island(&self) -> bool {
+        return self.is_head() && self.is_tail();
     }
 
     ///
@@ -192,6 +200,30 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
         node_from.borrow_mut().unlink_out(&node_to);
         node_to.borrow_mut().unlink_in(&node_from);
     }
+
+    ///
+    /// unlink everything from/to node_from
+    ///
+    fn unlink_all(node_from: &Link<T>) {
+        let mut outs_clone: Vec<Link<T>> = Vec::new();
+        let mut ins_clone: Vec<Link<T>> = Vec::new();
+        {
+            let node = node_from.borrow();
+            for me_out in &node.outs {
+                outs_clone.push(me_out.clone());
+            }
+            for me_in in &node.ins {
+                ins_clone.push(me_in.clone());
+            }
+        }
+
+        for l in outs_clone {
+            Node::unlink(node_from, &l);
+        }
+        for l in ins_clone {
+            Node::unlink(&l, node_from);
+        }
+    }
 }
 
 macro_rules! node_visit_impl {
@@ -233,30 +265,125 @@ impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
 /// The key to the map is T
 ///
 struct HashDAG<T> {
-    map: HashMap<T, Link<T>>
+    map: Rc<RefCell<HashMap<T, Link<T>>>>
+}
+
+///
+/// A thing that holds links in a hash map and a graph.
+/// The key to the map is T
+///
+struct SortedIter<T> {
+    map: Rc<RefCell<HashMap<T, Link<T>>>>,
+    seen: HashSet<T>,
+    head_count: usize,
+    tail_count: usize
+}
+
+impl <T> SortedIter<T> {
+    fn new(map: Rc<RefCell<HashMap<T, Link<T>>>>) -> Self {
+        let map_len = map.borrow().len();
+        return Self {
+            map,
+            head_count: 0,
+            tail_count: 0,
+            seen: HashSet::with_capacity(map_len)
+        }
+    }
+}
+
+impl <T> Iterator for SortedIter<T> where T: Clone + Hash + Eq + Display {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        let map = self.map.borrow();
+        let mut iter_count: usize = 0;
+        while self.seen.len() < map.len() {
+            for link in map.values() {
+
+                iter_count += 1;
+
+                let node = link.borrow();
+
+                // if we've seen it, next
+                if self.seen.contains(&node.entry) {
+                    continue;
+                }
+
+                if node.is_head() {
+                    self.head_count += 1;
+                } else if node.is_tail() {
+                    self.tail_count += 1;
+                }
+
+
+                // if all the ins have been seen (returned)
+                if node.ins.iter().all(|l| self.seen.contains(&l.borrow().entry)) {
+                    self.seen.insert(node.entry.clone());
+                    return Some(node.entry.clone());
+                }
+            }
+
+            // if we get here then we've hit every node.  This is most likely a cycle.
+            if iter_count >= map.len() {
+                break;
+            }
+        }
+        return None;
+    }
 }
 
 impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn new() -> Self {
         return Self {
-            map: HashMap::new()
+            map: Rc::new(RefCell::new(HashMap::new()))
         }
     }
 
     ///
     /// Add and/or link o1 and o2.  Returns self for fluent fun
     ///
-    fn link(&mut self, o1: T, o2: T) -> & mut Self {
-        let link1 = self.map.entry(o1.clone())
+    fn link(&self, o1: T, o2: T) -> & Self {
+        let mut map = self.map.borrow_mut();
+        let link1 = map.entry(o1.clone())
             .or_insert_with(|| Node::new_link(o1)).clone();
-        let link2 = self.map.entry(o2.clone())
+        let link2 = map.entry(o2.clone())
             .or_insert_with(|| Node::new_link(o2));
         Node::link(&link1, &link2);
         return self;
     }
 
-    fn sort(&self) {
-        for link in self.map.values() {
+    ///
+    /// Add and/or link o1 and o2.  Returns self for fluent fun
+    ///
+    fn unlink(&self, o1: &T, o2: &T) -> & Self {
+        let map = self.map.borrow();
+        let maybe_link1 = map.get(o1);
+        let maybe_link2 = map.get(o2);
+        if let Some(link1) = maybe_link1 {
+            if let Some(link2) = maybe_link2 {
+                Node::unlink(link1, link2);
+            }
+        }
+        return self;
+    }
+
+    ///
+    /// Remove the thing
+    ///
+    fn remove(& self, o: &T)  -> & Self {
+        let mut map = self.map.borrow_mut();
+        if let Some(link) = map.remove(o) {
+            Node::unlink_all(&link);
+        }
+        return self;
+    }
+
+    ///
+    /// Flattens the graph into a singly linked thing if possible
+    ///
+    fn flatten(&self) {
+        let map = self.map.borrow();
+        for link in map.values() {
             let removables = link.borrow().get_removable_direct_links();
             for remove in removables {
                 Node::unlink(link, &remove);
@@ -265,12 +392,20 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     }
 
     ///
+    /// Gets a sorted iter
+    ///
+    fn sorted_iter(&self) -> SortedIter<T> {
+        return SortedIter::new(self.map.clone());
+    }
+
+    ///
     /// Get all the cycles in the graph
     ///
     fn get_cycles(&self, first: bool) -> Vec<Vec<T>> {
         let mut head_count = 0;
         let mut paths: Vec<Vec<T>> = Vec::new();
-        for link in self.map.values() {
+        let map = self.map.borrow();
+        for link in map.values() {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
@@ -285,7 +420,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
 
         // if head count is 0 then the entire thing is a cycle
         if head_count == 0 {
-            let link = self.map.values().find(|_| true).unwrap();
+            let link = map.values().find(|_| true).unwrap();
             let node = link.borrow();
             if let Some(cycle) = node.get_cycle_path() {
                 paths.push(cycle);
@@ -305,7 +440,8 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn is_singly_linked(&self) -> bool {
         let mut head_count: usize = 0;
         let mut tail_count: usize = 0;
-        for link in self.map.values() {
+        let map = self.map.borrow();
+        for link in map.values() {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
@@ -322,7 +458,8 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
 
 macro_rules! hashdag_visit_impl {
     ($self:expr, $visitor:expr, $visit_call:ident) => {{
-        for link in $self.map.values() {
+        let map = $self.map.borrow();
+        for link in map.values() {
             let node = link.borrow();
             if node.is_head() && node.$visit_call($visitor) {
                 return true;
@@ -366,6 +503,44 @@ mod tests {
     }
 
     #[test]
+    fn test_stuff_2() {
+        let mut dag: HashDAG<char> = HashDAG::new();
+        dag.link('c', 'd')
+            .link('a', 'd')
+            .link('b', 'c')
+            .link('a', 'b')
+            .link('a', 'c')
+            .link('a', 'b')
+            .link('a', 'a')
+            .link('c', 'f')
+            .link('b', 'f')
+            .link('f', 'd');
+
+        println!("KAHN Sorted");
+        for x in dag.sorted_iter() {
+            print!("{}", x);
+        }
+
+        println!("\nKAHN Sorted without f");
+        dag.remove(&'f');
+        for x in dag.sorted_iter() {
+            print!("{}", x);
+        }
+
+        println!("\nKAHN Sorted with internal cycle");
+        dag.link('c', 'b');
+        for x in dag.sorted_iter() {
+            print!("{}", x);
+        }
+
+        println!("\nKAHN Sorted with external cycle");
+        dag.link('d', 'a');
+        for x in dag.sorted_iter() {
+            print!("{}", x);
+        }
+    }
+
+    #[test]
     fn test_stuff() {
         let mut dag: HashDAG<char> = HashDAG::new();
         dag.link('c', 'd')
@@ -379,8 +554,13 @@ mod tests {
         assert_eq!(dag.is_singly_linked(), false);
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
+        println!(" KAHN Sorted (non-destructive) ");
+        for x in dag.sorted_iter() {
+            print!("{}", x);
+        }
+        println!("\n");
 
-        dag.sort();
+        dag.flatten();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
@@ -391,7 +571,7 @@ mod tests {
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
 
-        dag.sort();
+        dag.flatten();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
@@ -402,7 +582,7 @@ mod tests {
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
 
-        dag.sort();
+        dag.flatten();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
@@ -414,6 +594,12 @@ mod tests {
             .map(String::from_iter)
             .collect();
         println!("{}", cycles.join("\n"));
+
+
+        dag.unlink(&'x', &'d');
+        assert_eq!(dag.is_singly_linked(), true);
+        assert_eq!(dag.contains_cycle(), false);
+        dag.visit(dag_printer);
     }
 
     #[test]
@@ -443,7 +629,7 @@ mod tests {
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
 
-        dag.sort();
+        dag.flatten();
         assert_eq!(dag.is_singly_linked(), true);
         assert_eq!(dag.contains_cycle(), false);
         dag.visit(dag_printer);
