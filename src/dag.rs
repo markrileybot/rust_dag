@@ -10,6 +10,26 @@ use std::rc::Rc;
 
 type Link<T> = Rc<RefCell<Node<T>>>;
 
+trait Owner {}
+
+struct VisitState<T> {
+    entry: Option<T>,
+    head: bool,
+    tail: bool,
+    level: usize
+}
+
+impl <T> VisitState<T> {
+    fn new() -> Self {
+        return Self {
+            entry: None,
+            head: false,
+            tail: false,
+            level: 0
+        }
+    }
+}
+
 ///
 /// Things that can be visited with a closure or a function pointer.
 ///
@@ -22,18 +42,42 @@ trait Visitable<T> {
     /// and use it outside of the visit.
     ///
     fn visit_mut<V>(&self, visitor: &mut V) -> bool
-        where V: FnMut(&T, bool, bool) -> bool;
+        where V: FnMut(&VisitState<T>) -> bool {
+        return self._visit_mut(&mut VisitState::new(), visitor);
+    }
 
     ///
     /// Visit borrowed
     ///
     fn visit_ref<V>(&self, visitor: &V) -> bool
-        where V: Fn(&T, bool, bool) -> bool;
+        where V: Fn(&VisitState<T>) -> bool {
+        return self._visit_ref(&mut VisitState::new(), visitor);
+    }
 
     ///
     /// Visit with a function pointer.  Simpler.
     ///
-    fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool;
+    fn visit(&self, visitor: fn(&VisitState<T>) -> bool) -> bool {
+        return self._visit(&mut VisitState::new(), visitor);
+    }
+
+    ///
+    /// Visit mutably.  This is good for when you want to keep state
+    /// and use it outside of the visit.
+    ///
+    fn _visit_mut<V>(&self, state: &mut VisitState<T>, visitor: &mut V) -> bool
+        where V: FnMut(&VisitState<T>) -> bool;
+
+    ///
+    /// Visit borrowed
+    ///
+    fn _visit_ref<V>(&self, state: &mut VisitState<T>, visitor: &V) -> bool
+        where V: Fn(&VisitState<T>) -> bool;
+
+    ///
+    /// Visit with a function pointer.  Simpler.
+    ///
+    fn _visit(&self, state: &mut VisitState<T>, visitor: fn(&VisitState<T>) -> bool) -> bool;
 }
 
 ///
@@ -146,7 +190,8 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
             let node = link.borrow();
             for link2 in &self.outs {
                 let node2 = link2.borrow();
-                if link != link2 && node2.visit_ref(&|c, _, _| c == &node.entry) {
+                if link != link2 && node2.visit_ref(&|s|
+                    s.entry.as_ref().unwrap() == &node.entry) {
                     removals.push(link.clone());
                     break;
                 }
@@ -227,15 +272,23 @@ impl <T> Node<T> where T: Clone + Hash + Eq {
 }
 
 macro_rules! node_visit_impl {
-    ($self:expr, $visitor:expr, $visit_call:ident) => {{
-        if $visitor(&$self.entry, $self.is_head(), $self.is_tail()) {
+    ($self:expr, $state:expr, $visitor:expr, $visit_call:ident) => {{
+        $state.entry = Some($self.entry.clone());
+        $state.head = $self.is_head();
+        $state.tail = $self.is_tail();
+        $state.level += 1;
+
+        if $visitor(&$state) {
             return true;
         }
         for link in &$self.outs {
-            if link.borrow().$visit_call($visitor) {
+            let node = link.borrow();
+            if node.$visit_call($state, $visitor) {
                 return true;
             }
         }
+
+        $state.level -= 1;
         return false;
     }}
 }
@@ -245,43 +298,44 @@ macro_rules! node_visit_impl {
 ///
 impl <T> Visitable<T> for Node<T> where T: Clone + Hash + Eq {
 
-    fn visit_mut<V>(&self, visitor: &mut V) -> bool
-        where V: FnMut(&T, bool, bool) -> bool {
-        node_visit_impl!(self, visitor, visit_mut);
+    fn _visit_mut<V>(&self, state: &mut VisitState<T>, visitor: &mut V) -> bool
+        where V: FnMut(&VisitState<T>) -> bool {
+        node_visit_impl!(self, state, visitor, _visit_mut);
     }
 
-    fn visit_ref<V>(&self, visitor: &V) -> bool
-        where V: Fn(&T, bool, bool) -> bool {
-        node_visit_impl!(self, visitor, visit_ref);
+    fn _visit_ref<V>(&self, state: &mut VisitState<T>, visitor: &V) -> bool
+        where V: Fn(&VisitState<T>) -> bool {
+        node_visit_impl!(self, state, visitor, _visit_ref);
     }
 
-    fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
-        node_visit_impl!(self, visitor, visit);
+    fn _visit(&self, state: &mut VisitState<T>, visitor: fn(&VisitState<T>) -> bool) -> bool {
+        node_visit_impl!(self, state, visitor, _visit);
     }
 }
+
+impl <T> Owner for Node<T> {}
 
 ///
 /// A thing that holds links in a hash map and a graph.
 /// The key to the map is T
 ///
 struct HashDAG<T> {
-    map: Rc<RefCell<HashMap<T, Link<T>>>>
+    map: HashMap<T, Link<T>>
 }
 
 ///
-/// A thing that holds links in a hash map and a graph.
-/// The key to the map is T
+/// An iter over HashDAG that is sorted
 ///
-struct SortedIter<T> {
-    map: Rc<RefCell<HashMap<T, Link<T>>>>,
+struct SortedIter<'a, T> {
+    map: &'a HashMap<T, Link<T>>,
     seen: HashSet<T>,
     head_count: usize,
     tail_count: usize
 }
 
-impl <T> SortedIter<T> {
-    fn new(map: Rc<RefCell<HashMap<T, Link<T>>>>) -> Self {
-        let map_len = map.borrow().len();
+impl <'a, T> SortedIter<'a, T> {
+    fn new(map: &'a HashMap<T, Link<T>>) -> Self {
+        let map_len = map.len();
         return Self {
             map,
             head_count: 0,
@@ -291,11 +345,11 @@ impl <T> SortedIter<T> {
     }
 }
 
-impl <T> Iterator for SortedIter<T> where T: Clone + Hash + Eq + Display {
+impl <'a, T> Iterator for SortedIter<'a, T> where T: Clone + Hash + Eq {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        let map = self.map.borrow();
+        let map = self.map;
         let mut iter_count: usize = 0;
         while self.seen.len() < map.len() {
             for link in map.values() {
@@ -328,6 +382,7 @@ impl <T> Iterator for SortedIter<T> where T: Clone + Hash + Eq + Display {
                 break;
             }
         }
+
         return None;
     }
 }
@@ -335,18 +390,17 @@ impl <T> Iterator for SortedIter<T> where T: Clone + Hash + Eq + Display {
 impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn new() -> Self {
         return Self {
-            map: Rc::new(RefCell::new(HashMap::new()))
+            map: HashMap::new()
         }
     }
 
     ///
     /// Add and/or link o1 and o2.  Returns self for fluent fun
     ///
-    fn link(&self, o1: T, o2: T) -> & Self {
-        let mut map = self.map.borrow_mut();
-        let link1 = map.entry(o1.clone())
+    fn link(& mut self, o1: T, o2: T) -> & mut Self {
+        let link1 = self.map.entry(o1.clone())
             .or_insert_with(|| Node::new_link(o1)).clone();
-        let link2 = map.entry(o2.clone())
+        let link2 = self.map.entry(o2.clone())
             .or_insert_with(|| Node::new_link(o2));
         Node::link(&link1, &link2);
         return self;
@@ -356,9 +410,8 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     /// Add and/or link o1 and o2.  Returns self for fluent fun
     ///
     fn unlink(&self, o1: &T, o2: &T) -> & Self {
-        let map = self.map.borrow();
-        let maybe_link1 = map.get(o1);
-        let maybe_link2 = map.get(o2);
+        let maybe_link1 = self.map.get(o1);
+        let maybe_link2 = self.map.get(o2);
         if let Some(link1) = maybe_link1 {
             if let Some(link2) = maybe_link2 {
                 Node::unlink(link1, link2);
@@ -370,9 +423,8 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     ///
     /// Remove the thing
     ///
-    fn remove(& self, o: &T)  -> & Self {
-        let mut map = self.map.borrow_mut();
-        if let Some(link) = map.remove(o) {
+    fn remove(& mut self, o: &T)  -> & mut Self {
+        if let Some(link) = self.map.remove(o) {
             Node::unlink_all(&link);
         }
         return self;
@@ -382,8 +434,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     /// Flattens the graph into a singly linked thing if possible
     ///
     fn flatten(&self) {
-        let map = self.map.borrow();
-        for link in map.values() {
+        for link in self.map.values() {
             let removables = link.borrow().get_removable_direct_links();
             for remove in removables {
                 Node::unlink(link, &remove);
@@ -395,7 +446,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     /// Gets a sorted iter
     ///
     fn sorted_iter(&self) -> SortedIter<T> {
-        return SortedIter::new(self.map.clone());
+        return SortedIter::new(&self.map);
     }
 
     ///
@@ -404,8 +455,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn get_cycles(&self, first: bool) -> Vec<Vec<T>> {
         let mut head_count = 0;
         let mut paths: Vec<Vec<T>> = Vec::new();
-        let map = self.map.borrow();
-        for link in map.values() {
+        for link in self.map.values() {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
@@ -420,7 +470,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
 
         // if head count is 0 then the entire thing is a cycle
         if head_count == 0 {
-            let link = map.values().find(|_| true).unwrap();
+            let link = self.map.values().find(|_| true).unwrap();
             let node = link.borrow();
             if let Some(cycle) = node.get_cycle_path() {
                 paths.push(cycle);
@@ -440,8 +490,7 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
     fn is_singly_linked(&self) -> bool {
         let mut head_count: usize = 0;
         let mut tail_count: usize = 0;
-        let map = self.map.borrow();
-        for link in map.values() {
+        for link in self.map.values() {
             let node = link.borrow();
             if node.is_head() {
                 head_count += 1;
@@ -457,11 +506,10 @@ impl <T> HashDAG<T> where T: Clone + Hash + Eq + Display {
 }
 
 macro_rules! hashdag_visit_impl {
-    ($self:expr, $visitor:expr, $visit_call:ident) => {{
-        let map = $self.map.borrow();
-        for link in map.values() {
+    ($self:expr, $state:expr, $visitor:expr, $visit_call:ident) => {{
+        for link in $self.map.values() {
             let node = link.borrow();
-            if node.is_head() && node.$visit_call($visitor) {
+            if node.is_head() && node.$visit_call($state, $visitor) {
                 return true;
             }
         }
@@ -469,18 +517,18 @@ macro_rules! hashdag_visit_impl {
     }}
 }
 impl <T> Visitable<T> for HashDAG<T> where T: Clone + Hash + Eq {
-    fn visit_mut<V>(&self, visitor: &mut V) -> bool
-        where V: FnMut(&T, bool, bool) -> bool {
-        hashdag_visit_impl!(self, visitor, visit_mut);
+    fn _visit_mut<V>(&self, state: &mut VisitState<T>, visitor: &mut V) -> bool
+        where V: FnMut(&VisitState<T>) -> bool {
+        hashdag_visit_impl!(self, state, visitor, _visit_mut);
     }
 
-    fn visit_ref<V>(&self, visitor: &V) -> bool
-        where V: Fn(&T, bool, bool) -> bool {
-        hashdag_visit_impl!(self, visitor, visit_ref);
+    fn _visit_ref<V>(&self, state: &mut VisitState<T>, visitor: &V) -> bool
+        where V: Fn(&VisitState<T>) -> bool {
+        hashdag_visit_impl!(self, state, visitor, _visit_ref);
     }
 
-    fn visit(&self, visitor: fn(&T, bool, bool) -> bool) -> bool {
-        hashdag_visit_impl!(self, visitor, visit);
+    fn _visit(&self, state: &mut VisitState<T>, visitor: fn(&VisitState<T>) -> bool) -> bool {
+        hashdag_visit_impl!(self, state, visitor, _visit);
     }
 }
 
@@ -489,15 +537,15 @@ mod tests {
     use std::cmp::min;
     use std::iter::FromIterator;
 
-    use crate::dag::{HashDAG, Visitable};
+    use crate::dag::{HashDAG, Visitable, VisitState};
 
-    fn dag_printer(c: &char, head: bool, tail: bool) -> bool {
-        if tail {
-            println!("{} >>", c);
-        } else if head {
-            print!("<< {}->", c);
+    fn dag_printer(state: &VisitState<char>) -> bool {
+        if state.tail {
+            println!("{} >>", state.entry.unwrap());
+        } else if state.head {
+            print!("<< {}->", state.entry.unwrap());
         } else {
-            print!("{}->", c);
+            print!("{}->", state.entry.unwrap());
         }
         return false;
     }
